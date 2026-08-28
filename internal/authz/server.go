@@ -69,6 +69,8 @@ func (s *Server) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.C
 	switch {
 	case d.reason == ReasonInternal:
 		outcome = metrics.DecisionError
+	case d.shadow:
+		outcome = metrics.DecisionShadowDeny
 	case !d.allowed:
 		outcome = metrics.DecisionDeny
 	}
@@ -80,8 +82,16 @@ func (s *Server) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.C
 }
 
 func (s *Server) logDecision(d decision, req policy.Request, headers map[string]string) {
+	outcome := "deny"
+	switch {
+	case d.shadow:
+		outcome = "shadow_deny"
+	case d.allowed:
+		outcome = "allow"
+	}
+
 	attrs := []any{
-		"decision", map[bool]string{true: "allow", false: "deny"}[d.allowed],
+		"decision", outcome,
 		"reason", d.reason,
 		"rule", d.rule,
 		"method", req.Method,
@@ -97,11 +107,16 @@ func (s *Server) logDecision(d decision, req policy.Request, headers map[string]
 		// check tells whoever is probing which one to work on next.
 		attrs = append(attrs, "detail", d.detail)
 	}
-	if d.allowed {
+	switch {
+	case d.shadow:
+		// Logged at info even though the request was allowed: during a
+		// rollout these are the lines someone is actually reading.
+		s.log.Info("would have denied", attrs...)
+	case d.allowed:
 		s.log.Debug("allowed", attrs...)
-		return
+	default:
+		s.log.Info("denied", attrs...)
 	}
-	s.log.Info("denied", attrs...)
 }
 
 func (s *Server) respond(d decision, headers map[string]string) *authv3.CheckResponse {
@@ -197,6 +212,11 @@ func dynamicMetadata(d decision) *structpb.Struct {
 	fields := map[string]any{
 		"rule":   d.rule,
 		"reason": string(d.reason),
+	}
+	if d.shadow {
+		// Published so an access log can count would-be denials per route
+		// without anyone having to join it against this service's own logs.
+		fields["shadow"] = true
 	}
 	if d.identity != nil {
 		fields["subject"] = d.identity.Subject

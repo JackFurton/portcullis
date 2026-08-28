@@ -78,18 +78,29 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	return newFixtureWithCache(t, token.DefaultCacheSize)
+	return newFixtureWith(t, policyTemplate, token.DefaultCacheSize)
 }
 
 func newFixtureWithCache(t *testing.T, cacheSize int) *fixture {
+	t.Helper()
+	return newFixtureWith(t, policyTemplate, cacheSize)
+}
+
+func newFixtureWithPolicy(t *testing.T, template string) *fixture {
+	t.Helper()
+	return newFixtureWith(t, template, token.DefaultCacheSize)
+}
+
+// newFixtureWith builds a server over a policy written by the test, with the
+// issuer URL and JWKS URL of a freshly minted issuer filled in.
+func newFixtureWith(t *testing.T, template string, cacheSize int) *fixture {
 	t.Helper()
 
 	issuer := testjwt.New(t, "corp", "https://accounts.example.com/")
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "policy.yaml")
-	body := fmt.Sprintf(policyTemplate, issuer.URL, issuer.JWKSURL())
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(fmt.Sprintf(template, issuer.URL, issuer.JWKSURL())), 0o600); err != nil {
 		t.Fatalf("write policy: %v", err)
 	}
 
@@ -170,6 +181,101 @@ func deniedHeader(resp *authv3.CheckResponse, name string) string {
 		}
 	}
 	return ""
+}
+
+const shadowPolicy = `
+mode: shadow
+issuers:
+  - name: corp
+    issuer: %s
+    jwksURL: %s
+    audiences: [api://test]
+    algorithms: [RS256]
+    tenantClaim: tenant_id
+    scopeClaim: scope
+rules:
+  - name: enforced-admin
+    mode: enforce
+    match:
+      pathPrefixes: [/v1/admin]
+    allow:
+      scopes: [admin]
+      tenants: [acme]
+
+  - name: shadowed-events
+    match:
+      pathPrefixes: [/v1/events]
+    allow:
+      scopes: [events.read]
+      tenants: ["*"]
+`
+
+// Shadow mode is how a policy gets rolled out without an outage: it allows the
+// request, records what it would have done, and counts it separately.
+func TestShadowModeAllowsWhatItWouldDeny(t *testing.T) {
+	f := newFixtureWithPolicy(t, shadowPolicy)
+
+	// No scope, so the rule would refuse this.
+	headers := f.bearer(t, testjwt.Claims{"sub": "svc", "tenant_id": "acme"})
+
+	resp := f.check(t, "GET", "/v1/events", headers)
+	if !allowed(resp) {
+		t.Fatalf("a shadowed rule must allow, got %d %s", deniedStatus(resp), deniedError(t, resp))
+	}
+
+	metadata := resp.GetDynamicMetadata().AsMap()
+	if metadata["shadow"] != true {
+		t.Error("the decision should be marked shadow so an access log can count it")
+	}
+	if metadata["reason"] != string(authz.ReasonInsufficientScope) {
+		t.Errorf("reason = %v, want the reason it would have been denied", metadata["reason"])
+	}
+}
+
+// The upstream has to see the same headers it will see once the rule is
+// enforced, or the shadow run proves nothing about what enforcing will do.
+func TestShadowModeStillForwardsIdentity(t *testing.T) {
+	f := newFixtureWithPolicy(t, shadowPolicy)
+
+	headers := f.bearer(t, testjwt.Claims{"sub": "svc", "tenant_id": "acme"})
+
+	resp := f.check(t, "GET", "/v1/events", headers)
+	if !allowed(resp) {
+		t.Fatal("expected allow")
+	}
+	if got := responseHeader(resp, "x-portcullis-tenant"); got != "acme" {
+		t.Errorf("tenant header = %q, want it forwarded as it would be under enforcement", got)
+	}
+}
+
+// A rule can opt back into enforcement while the rest of the policy is shadowed,
+// which is what a staged rollout looks like in practice.
+func TestRuleModeOverridesThePolicyDefault(t *testing.T) {
+	f := newFixtureWithPolicy(t, shadowPolicy)
+
+	headers := f.bearer(t, testjwt.Claims{"sub": "svc", "tenant_id": "initech", "scope": "admin"})
+
+	resp := f.check(t, "GET", "/v1/admin/users", headers)
+	if allowed(resp) {
+		t.Fatal("a rule set to enforce must deny even when the policy default is shadow")
+	}
+	if got := deniedError(t, resp); got != string(authz.ReasonWrongTenant) {
+		t.Errorf("error = %q, want %q", got, authz.ReasonWrongTenant)
+	}
+}
+
+// Shadow suppresses denials, not errors. Whether the service could reach a
+// decision is a different question from what the decision would have been.
+func TestShadowModeDoesNotSuppressInternalErrors(t *testing.T) {
+	f := newFixtureWithPolicy(t, shadowPolicy)
+
+	resp, err := f.server.Check(context.Background(), &authv3.CheckRequest{})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if allowed(resp) {
+		t.Fatal("a request the service could not evaluate must still fail closed under shadow")
+	}
 }
 
 func TestPublicRuleNeedsNoToken(t *testing.T) {

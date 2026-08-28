@@ -32,26 +32,41 @@ func NewEvaluator(store *policy.Store, verifier *token.Verifier, log *slog.Logge
 func (e *Evaluator) Evaluate(ctx context.Context, req policy.Request, authorization string) decision {
 	config := e.store.Config()
 
+	d, rule := e.decide(ctx, config, req, authorization)
+
+	// Shadow is applied last, to the finished decision, so every denial goes
+	// through exactly one place on its way to being suppressed. An internal
+	// error is left alone: failureMode governs that, and quietly allowing a
+	// request the service could not evaluate is not what shadow means.
+	if !d.allowed && d.reason != ReasonInternal && config.EffectiveMode(rule) == policy.ModeShadow {
+		return d.shadowed()
+	}
+	return d
+}
+
+// decide works out what the policy says, ignoring mode. It returns the rule it
+// matched so the caller can find the mode that applies.
+func (e *Evaluator) decide(ctx context.Context, config *policy.Config, req policy.Request, authorization string) (decision, *policy.Rule) {
 	path, err := policy.NormalizePath(req.Path)
 	if err != nil {
 		// The path this service matched on has to be the path the upstream
 		// routes on. When it cannot be reduced to one, no rule means anything.
-		return deny("", ReasonMalformedPath, http.StatusBadRequest, err.Error())
+		return deny("", ReasonMalformedPath, http.StatusBadRequest, err.Error()), nil
 	}
 
 	rule, ok := config.Match(req, path)
 	if !ok {
-		return deny("", ReasonNoRule, http.StatusForbidden, "no rule matched")
+		return deny("", ReasonNoRule, http.StatusForbidden, "no rule matched"), nil
 	}
 	if rule.Allow == nil {
-		return deny(rule.Name, ReasonRuleDenies, http.StatusForbidden, "rule has no allow block")
+		return deny(rule.Name, ReasonRuleDenies, http.StatusForbidden, "rule has no allow block"), rule
 	}
 
 	raw, hasToken := token.BearerToken(authorization)
 
 	if rule.Allow.Public {
 		if !hasToken {
-			return allow(rule.Name, ReasonPublic, nil)
+			return allow(rule.Name, ReasonPublic, nil), rule
 		}
 		// A public rule with a token attached still identifies the caller when
 		// it can, but a token that does not verify is not a denial. Making it
@@ -59,23 +74,23 @@ func (e *Evaluator) Evaluate(ctx context.Context, req policy.Request, authorizat
 		identity, err := e.verify(ctx, config, raw)
 		if err != nil {
 			e.log.Debug("ignoring an invalid token on a public rule", "rule", rule.Name, "error", err)
-			return allow(rule.Name, ReasonPublic, nil)
+			return allow(rule.Name, ReasonPublic, nil), rule
 		}
-		return allow(rule.Name, ReasonPublic, identity)
+		return allow(rule.Name, ReasonPublic, identity), rule
 	}
 
 	if !hasToken {
-		return unauthorized(rule.Name, ReasonMissingToken, "invalid_request", "no bearer token")
+		return unauthorized(rule.Name, ReasonMissingToken, "invalid_request", "no bearer token"), rule
 	}
 
 	issuerURL, ok := token.PeekIssuer(raw)
 	if !ok {
-		return unauthorized(rule.Name, ReasonInvalidToken, "invalid_token", "token has no readable issuer")
+		return unauthorized(rule.Name, ReasonInvalidToken, "invalid_token", "token has no readable issuer"), rule
 	}
 	issuer, ok := config.IssuerByURL(issuerURL)
 	if !ok {
 		return unauthorized(rule.Name, ReasonUnknownIssuer, "invalid_token",
-			fmt.Sprintf("issuer %q is not configured", issuerURL))
+			fmt.Sprintf("issuer %q is not configured", issuerURL)), rule
 	}
 
 	// Whether this rule accepts this issuer is checked before the signature.
@@ -83,39 +98,43 @@ func (e *Evaluator) Evaluate(ctx context.Context, req policy.Request, authorizat
 	// into failed verifications on rules that would have rejected it anyway.
 	if len(rule.Allow.Issuers) > 0 && !slices.Contains(rule.Allow.Issuers, issuer.Name) {
 		return deny(rule.Name, ReasonIssuerNotAllowed, http.StatusForbidden,
-			fmt.Sprintf("rule does not accept issuer %q", issuer.Name))
+			fmt.Sprintf("rule does not accept issuer %q", issuer.Name)), rule
 	}
 
 	identity, err := e.verifier.Verify(ctx, issuer, raw)
 	if err != nil {
 		if isUpstreamFailure(err) {
-			return e.failure(config, rule.Name, fmt.Sprintf("cannot verify against issuer %q: %v", issuer.Name, err))
+			return e.failure(config, rule.Name, fmt.Sprintf("cannot verify against issuer %q: %v", issuer.Name, err)), rule
 		}
-		return unauthorized(rule.Name, ReasonInvalidToken, "invalid_token", err.Error())
+		return unauthorized(rule.Name, ReasonInvalidToken, "invalid_token", err.Error()), rule
 	}
 
 	if len(rule.Allow.Tenants) > 0 {
 		switch {
 		case identity.Tenant == "":
-			return deny(rule.Name, ReasonWrongTenant, http.StatusForbidden, "token carries no tenant")
+			return deny(rule.Name, ReasonWrongTenant, http.StatusForbidden, "token carries no tenant").
+				withIdentity(identity), rule
 		case slices.Contains(rule.Allow.Tenants, policy.AnyTenant):
 			// Any tenant will do, but there has to be one.
 		case !slices.Contains(rule.Allow.Tenants, identity.Tenant):
-			return deny(rule.Name, ReasonWrongTenant, http.StatusForbidden, "tenant is not allowed by this rule")
+			return deny(rule.Name, ReasonWrongTenant, http.StatusForbidden, "tenant is not allowed by this rule").
+				withIdentity(identity), rule
 		}
 	}
 
 	if len(rule.Allow.Subjects) > 0 && !slices.Contains(rule.Allow.Subjects, identity.Subject) {
-		return deny(rule.Name, ReasonWrongSubject, http.StatusForbidden, "subject is not allowed by this rule")
+		return deny(rule.Name, ReasonWrongSubject, http.StatusForbidden, "subject is not allowed by this rule").
+			withIdentity(identity), rule
 	}
 
 	if !identity.HasScopes(rule.Allow.Scopes) {
-		d := deny(rule.Name, ReasonInsufficientScope, http.StatusForbidden, "token is missing a required scope")
+		d := deny(rule.Name, ReasonInsufficientScope, http.StatusForbidden, "token is missing a required scope").
+			withIdentity(identity)
 		d.challenge = fmt.Sprintf(`Bearer error="insufficient_scope", scope=%q`, strings.Join(rule.Allow.Scopes, " "))
-		return d
+		return d, rule
 	}
 
-	return allow(rule.Name, ReasonAllowed, identity)
+	return allow(rule.Name, ReasonAllowed, identity), rule
 }
 
 // verify picks the issuer from the token and verifies against it. Used for the
