@@ -1,5 +1,8 @@
 # portcullis
 
+[![CI](https://github.com/JackFurton/portcullis/actions/workflows/ci.yml/badge.svg)](https://github.com/JackFurton/portcullis/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/JackFurton/portcullis.svg)](https://pkg.go.dev/github.com/JackFurton/portcullis)
+
 An external authorization service for Envoy and Istio, in Go.
 
 Envoy asks it about every request. It verifies the bearer token against the
@@ -138,16 +141,43 @@ calling when it can. A token that fails verification does not turn the request
 into a denial: making it one would turn every public endpoint into an oracle
 for whether a forged token validates.
 
+## Cost per request
+
+This service runs on every request through the mesh, so its own latency is
+everyone's latency. Measured on an M5 with `go test ./internal/authz -bench .`,
+covering the whole `Check` call: matching the rule, verifying the signature,
+checking the claims and building the response.
+
+| Path | Time | Allocations |
+| --- | --- | --- |
+| Allowed, token already verified | 2.5 µs | 59 |
+| Allowed, cold cache | 29.7 µs | 211 |
+| Denied on scope | 3.3 µs | 53 |
+| Public rule, no token | 0.6 µs | 20 |
+| Protected rule, no token | 1.9 µs | 41 |
+
+The gap between the first two rows is one RSA verification. A caller reuses a
+token for its whole lifetime, so results are cached: keyed by a hash of the
+token, never the token itself, bounded and LRU evicted, flushed whenever the
+policy reloads. Expiry is enforced on every hit and a result is reused for at
+most 60 seconds, so the cache can neither outlive a token nor keep serving a
+decision made under an issuer configuration that has since changed.
+
+`--token-cache-size 0` disables it, at roughly twelve times the CPU per
+request.
+
 ## Configuration
 
 ```bash
 portcullis --policy /etc/portcullis/policy.yaml \
            --grpc-addr :9191 \
-           --admin-addr :9192
+           --admin-addr :9192 \
+           --token-cache-size 10000
 ```
 
 `--check` validates the policy and exits, which is worth running in CI
-(`make check-policy`).
+(`make check-policy`). `--version` prints the build and the commit it came
+from.
 
 The policy file is watched and reloaded in place. It watches the containing
 directory rather than the file, because a ConfigMap mounted into a pod is a
@@ -159,6 +189,13 @@ tenant or subject label: both are attacker influenced and unbounded, and a
 label like that is how a metrics endpoint takes down the cluster it monitors.
 
 ## Deploying
+
+```bash
+kubectl apply -f deploy/kubernetes/portcullis.yaml
+```
+
+Images are published to `ghcr.io/jackfurton/portcullis` on every tag, for
+`linux/amd64` and `linux/arm64`.
 
 `deploy/kubernetes/portcullis.yaml` has the Deployment, Service, ConfigMap and
 PodDisruptionBudget. `deploy/istio/` has the mesh `extensionProvider` and the
@@ -179,8 +216,18 @@ exactly the code a stub verifier would replace.
 
 ## Status
 
-Working and tested, but young, and the policy format may change. The HTTP
-bearer token path is implemented; mTLS and opaque token introspection are not.
+Working and tested, but young, and the policy format may change before v1.
+
+Implemented: HTTP bearer tokens, JWKS with rotation, per-rule issuer, tenant,
+subject and scope checks, hot policy reload, Prometheus metrics.
+
+Not implemented: mTLS on the gRPC listener, client certificate identity,
+opaque token introspection, per-tenant rate limiting. See the
+[open issues](https://github.com/JackFurton/portcullis/issues) for what is
+planned and why.
+
+Security notes, and what this service is and is not responsible for, are in
+[SECURITY.md](SECURITY.md).
 
 ## License
 

@@ -21,7 +21,7 @@ func newVerifier(t *testing.T) (*token.Verifier, *testjwt.Issuer, *policy.Issuer
 	config := issuer.Config()
 	cache := token.NewKeyCache(&http.Client{Timeout: 2 * time.Second},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
-	return token.NewVerifier(cache), issuer, &config
+	return token.NewVerifier(cache, token.DefaultCacheSize), issuer, &config
 }
 
 func TestVerifyAcceptsAValidToken(t *testing.T) {
@@ -268,6 +268,49 @@ func TestVerifyRequiresASubject(t *testing.T) {
 
 	if _, err := verifier.Verify(context.Background(), config, raw); !errors.Is(err, token.ErrMissingSubject) {
 		t.Errorf("error = %v, want %v", err, token.ErrMissingSubject)
+	}
+}
+
+// Signature verification is the expensive part of a decision and a caller
+// reuses one token for its whole lifetime, so the second check of the same
+// token must not redo the work.
+func TestVerifyCachesASuccessfulResult(t *testing.T) {
+	verifier, issuer, config := newVerifier(t)
+	raw := issuer.Sign(t, testjwt.Claims{"sub": "svc", "tenant_id": "acme"})
+
+	first, err := verifier.Verify(context.Background(), config, raw)
+	if err != nil {
+		t.Fatalf("first Verify: %v", err)
+	}
+	second, err := verifier.Verify(context.Background(), config, raw)
+	if err != nil {
+		t.Fatalf("second Verify: %v", err)
+	}
+
+	if first != second {
+		t.Error("the second verification should have come from the cache")
+	}
+	if verifier.Cached() != 1 {
+		t.Errorf("Cached() = %d, want 1", verifier.Cached())
+	}
+
+	verifier.Flush()
+	if verifier.Cached() != 0 {
+		t.Errorf("Cached() = %d after Flush, want 0", verifier.Cached())
+	}
+}
+
+// A rejection is never cached: a token that failed while the issuer's keys
+// were briefly unreachable has to be able to succeed once they come back.
+func TestVerifyDoesNotCacheFailures(t *testing.T) {
+	verifier, issuer, config := newVerifier(t)
+	raw := issuer.Sign(t, testjwt.Claims{"exp": time.Now().Add(-time.Hour).Unix()})
+
+	if _, err := verifier.Verify(context.Background(), config, raw); err == nil {
+		t.Fatal("expected the expired token to be rejected")
+	}
+	if verifier.Cached() != 0 {
+		t.Errorf("Cached() = %d, want failures not to be cached", verifier.Cached())
 	}
 }
 

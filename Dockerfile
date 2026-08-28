@@ -3,6 +3,8 @@
 FROM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
+# Stamped into the binary so a running pod can say what it is.
+ARG VERSION=dev
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -10,9 +12,9 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -o /out/portcullis ./cmd/portcullis
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -o /out/demoidp ./cmd/demoidp
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -o /out/echo ./cmd/echo
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -ldflags "-s -w -X github.com/JackFurton/portcullis/internal/version.Version=${VERSION}" -o /out/portcullis ./cmd/portcullis
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -ldflags "-s -w" -o /out/demoidp ./cmd/demoidp
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -ldflags "-s -w" -o /out/echo ./cmd/echo
 
 FROM gcr.io/distroless/static:nonroot
 COPY --from=builder /out/portcullis /portcullis

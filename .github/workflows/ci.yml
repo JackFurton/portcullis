@@ -23,6 +23,8 @@ jobs:
       - run: go test -race -coverprofile=cover.out ./...
       - name: Coverage
         run: go tool cover -func=cover.out | tail -1
+      # Compile and run every benchmark once, so they cannot rot unnoticed.
+      - run: go test ./... -run XXX -bench . -benchtime 1x
 
   lint:
     name: Lint

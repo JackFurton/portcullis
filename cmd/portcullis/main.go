@@ -32,6 +32,7 @@ import (
 	"github.com/JackFurton/portcullis/internal/metrics"
 	"github.com/JackFurton/portcullis/internal/policy"
 	"github.com/JackFurton/portcullis/internal/token"
+	"github.com/JackFurton/portcullis/internal/version"
 )
 
 func main() {
@@ -41,9 +42,17 @@ func main() {
 		adminAddr  = flag.String("admin-addr", ":9192", "address for metrics and health")
 		logLevel   = flag.String("log-level", "info", "one of debug, info, warn, error")
 		logFormat  = flag.String("log-format", "json", "json or text")
-		checkOnly  = flag.Bool("check", false, "validate the policy file and exit")
+		cacheSize  = flag.Int("token-cache-size", token.DefaultCacheSize,
+			"how many verified tokens to remember; 0 disables the cache and verifies every request")
+		checkOnly = flag.Bool("check", false, "validate the policy file and exit")
+		showVer   = flag.Bool("version", false, "print the version and exit")
 	)
 	flag.Parse()
+
+	if *showVer {
+		fmt.Println(version.String())
+		return
+	}
 
 	log := newLogger(*logLevel, *logFormat)
 
@@ -60,15 +69,17 @@ func main() {
 		return
 	}
 
-	if err := run(*policyPath, *grpcAddr, *adminAddr, log); err != nil {
+	if err := run(*policyPath, *grpcAddr, *adminAddr, *cacheSize, log); err != nil {
 		log.Error("shutting down", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(policyPath, grpcAddr, adminAddr string, log *slog.Logger) error {
+func run(policyPath, grpcAddr, adminAddr string, cacheSize int, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	log.Info("starting", "version", version.String())
 
 	store, err := policy.NewStore(policyPath, log)
 	if err != nil {
@@ -85,8 +96,13 @@ func run(policyPath, grpcAddr, adminAddr string, log *slog.Logger) error {
 	keys := token.NewKeyCache(&http.Client{Timeout: 5 * time.Second}, log)
 	keys.Warm(ctx, config)
 
+	verifier := token.NewVerifier(keys, cacheSize)
+
 	store.OnReload = func(config *policy.Config) {
 		metrics.PolicyReloads.WithLabelValues("success").Inc()
+		// A reload can change an issuer's audiences, algorithms or claim
+		// mapping, so results verified under the old policy are discarded.
+		verifier.Flush()
 		// A reload can add an issuer. Fetching its keys now keeps the first
 		// request that needs them off the critical path.
 		keys.Warm(ctx, config)
@@ -95,7 +111,7 @@ func run(policyPath, grpcAddr, adminAddr string, log *slog.Logger) error {
 		metrics.PolicyReloads.WithLabelValues("error").Inc()
 	}
 
-	server := authz.NewServer(store, token.NewVerifier(keys), log)
+	server := authz.NewServer(store, verifier, log)
 
 	grpcServer := grpc.NewServer(
 		// Envoy holds one long lived connection per proxy. Without these the

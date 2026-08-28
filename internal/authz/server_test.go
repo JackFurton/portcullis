@@ -71,11 +71,17 @@ rules:
 `
 
 type fixture struct {
-	server *authz.Server
-	issuer *testjwt.Issuer
+	server   *authz.Server
+	issuer   *testjwt.Issuer
+	verifier *token.Verifier
 }
 
 func newFixture(t *testing.T) *fixture {
+	t.Helper()
+	return newFixtureWithCache(t, token.DefaultCacheSize)
+}
+
+func newFixtureWithCache(t *testing.T, cacheSize int) *fixture {
 	t.Helper()
 
 	issuer := testjwt.New(t, "corp", "https://accounts.example.com/")
@@ -93,10 +99,12 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatalf("load policy: %v", err)
 	}
 	keys := token.NewKeyCache(&http.Client{Timeout: 2 * time.Second}, log)
+	verifier := token.NewVerifier(keys, cacheSize)
 
 	return &fixture{
-		server: authz.NewServer(store, token.NewVerifier(keys), log),
-		issuer: issuer,
+		server:   authz.NewServer(store, verifier, log),
+		issuer:   issuer,
+		verifier: verifier,
 	}
 }
 

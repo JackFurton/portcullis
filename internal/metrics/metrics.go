@@ -40,6 +40,15 @@ var (
 		Help: "Policy reload attempts by result.",
 	}, []string{"result"})
 
+	// TokenCache counts verification cache hits and misses. Signature
+	// verification is the expensive part of a decision, and a caller reuses
+	// one token for its whole lifetime, so a low hit rate here means either
+	// very short tokens or a cache that is too small.
+	TokenCache = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "portcullis_token_cache_total",
+		Help: "Verification cache lookups by result.",
+	}, []string{"result"})
+
 	// JWKSFetches counts key set fetches per issuer.
 	JWKSFetches = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "portcullis_jwks_fetches_total",

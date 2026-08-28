@@ -1,0 +1,22 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # One PR for the routine bumps. Anything touching how tokens are parsed
+      # or verified is worth reading on its own, so those stay separate.
+      go-dependencies:
+        patterns: ["*"]
+        exclude-patterns:
+          - "github.com/go-jose/*"
+          - "github.com/envoyproxy/*"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly

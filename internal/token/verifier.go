@@ -12,6 +12,7 @@ import (
 
 	jose "github.com/go-jose/go-jose/v4"
 
+	"github.com/JackFurton/portcullis/internal/metrics"
 	"github.com/JackFurton/portcullis/internal/policy"
 )
 
@@ -50,14 +51,25 @@ type Identity struct {
 
 // Verifier checks tokens against an issuer's published keys.
 type Verifier struct {
-	keys *KeyCache
-	now  func() time.Time
+	keys  *KeyCache
+	cache *verifiedCache
+	now   func() time.Time
 }
 
-// NewVerifier builds a Verifier over a key cache.
-func NewVerifier(keys *KeyCache) *Verifier {
-	return &Verifier{keys: keys, now: time.Now}
+// NewVerifier builds a Verifier over a key cache. cacheSize is how many
+// verification results to remember; zero disables the cache and pays for a
+// full signature check on every request.
+func NewVerifier(keys *KeyCache, cacheSize int) *Verifier {
+	return &Verifier{keys: keys, cache: newVerifiedCache(cacheSize), now: time.Now}
 }
+
+// Flush drops every cached verification result. Call it when the policy
+// changes: a result computed under the old issuer configuration says nothing
+// about the new one.
+func (v *Verifier) Flush() { v.cache.Flush() }
+
+// Cached reports how many verification results are held, for the metric.
+func (v *Verifier) Cached() int { return v.cache.Len() }
 
 // maxTokenBytes bounds the raw token. A JWT is a couple of kilobytes; a
 // megabyte of base64 is someone probing for a parser that allocates first and
@@ -74,6 +86,14 @@ func (v *Verifier) Verify(ctx context.Context, issuer *policy.Issuer, raw string
 	if raw == "" || len(raw) > maxTokenBytes {
 		return nil, fmt.Errorf("%w: empty or oversized", ErrMalformed)
 	}
+
+	skew := issuer.ClockSkew.Or(policy.DefaultClockSkew)
+	key := cacheKey(issuer.Name, raw)
+	if identity, ok := v.cache.get(key, v.now(), skew); ok {
+		metrics.TokenCache.WithLabelValues("hit").Inc()
+		return identity, nil
+	}
+	metrics.TokenCache.WithLabelValues("miss").Inc()
 
 	algorithms := make([]jose.SignatureAlgorithm, 0, len(issuer.Algorithms))
 	for _, alg := range issuer.Algorithms {
@@ -101,7 +121,15 @@ func (v *Verifier) Verify(ctx context.Context, issuer *policy.Issuer, raw string
 		return nil, err
 	}
 
-	return v.claims(issuer, payload)
+	identity, err := v.claims(issuer, payload)
+	if err != nil {
+		// Only successes are cached. Caching a rejection would mean a token
+		// that failed while the issuer's keys were briefly unreachable keeps
+		// failing after they come back.
+		return nil, err
+	}
+	v.cache.put(key, identity, v.now())
+	return identity, nil
 }
 
 // verifyAny tries each candidate key and returns the payload from the first
