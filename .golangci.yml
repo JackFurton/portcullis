@@ -1,0 +1,38 @@
+version: "2"
+run:
+  timeout: 5m
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - copyloopvar
+    - errcheck
+    - goconst
+    - gocyclo
+    - govet
+    - ineffassign
+    - misspell
+    - nakedret
+    - prealloc
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+  settings:
+    revive:
+      rules:
+        - name: comment-spacings
+        - name: import-shadowing
+        - name: exported
+  exclusions:
+    generated: lax
+    rules:
+      # Test tables repeat fixture values on purpose; hoisting them into
+      # constants makes the cases harder to read.
+      - linters: [goconst, gocyclo]
+        path: _test\.go
+formatters:
+  enable:
+    - gofmt
+    - goimports

@@ -1,0 +1,154 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: portcullis
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: portcullis
+  namespace: portcullis
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: portcullis-policy
+  namespace: portcullis
+data:
+  # Editing this ConfigMap reloads the policy in place. The service watches the
+  # mounted directory, and a policy that fails to validate is rejected while
+  # the previous one stays in force.
+  policy.yaml: |
+    failureMode: deny
+
+    issuers:
+      - name: corp
+        issuer: https://accounts.example.com/
+        jwksURL: https://accounts.example.com/.well-known/jwks.json
+        audiences: [api://gateway]
+        algorithms: [RS256, ES256]
+        tenantClaim: tenant_id
+        scopeClaim: scope
+
+    rules:
+      - name: health
+        match:
+          pathsExact: [/healthz, /readyz]
+          methods: [GET]
+        allow:
+          public: true
+
+      - name: api
+        match:
+          pathPrefixes: [/v1/]
+        allow:
+          issuers: [corp]
+          tenants: ["*"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: portcullis
+  namespace: portcullis
+  labels:
+    app.kubernetes.io/name: portcullis
+spec:
+  # This service is in the request path of everything the mesh routes, so it
+  # runs with more than one replica and spreads across nodes.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: portcullis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: portcullis
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9192"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: portcullis
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: portcullis
+      containers:
+        - name: portcullis
+          image: ghcr.io/jackfurton/portcullis:latest
+          args:
+            - --policy=/etc/portcullis/policy.yaml
+            - --grpc-addr=:9191
+            - --admin-addr=:9192
+          ports:
+            - name: grpc
+              containerPort: 9191
+            - name: admin
+              containerPort: 9192
+          volumeMounts:
+            - name: policy
+              mountPath: /etc/portcullis
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: admin
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: admin
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: policy
+          configMap:
+            name: portcullis-policy
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: portcullis
+  namespace: portcullis
+  labels:
+    app.kubernetes.io/name: portcullis
+spec:
+  selector:
+    app.kubernetes.io/name: portcullis
+  ports:
+    - name: grpc
+      port: 9191
+      targetPort: grpc
+      # Istio routes by port name. Without the grpc prefix the sidecar treats
+      # this as plain TCP and the ext_authz calls fail in ways that look like
+      # the service is down.
+      appProtocol: grpc
+    - name: http-admin
+      port: 9192
+      targetPort: admin
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: portcullis
+  namespace: portcullis
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: portcullis

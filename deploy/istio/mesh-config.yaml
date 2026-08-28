@@ -1,0 +1,34 @@
+# Registers portcullis as an external authorization provider.
+#
+# The gRPC service must be reachable from every sidecar that will call it, so
+# the address is the in-cluster Service.
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  name: portcullis
+  namespace: istio-system
+spec:
+  meshConfig:
+    extensionProviders:
+      - name: portcullis
+        envoyExtAuthzGrpc:
+          service: portcullis.portcullis.svc.cluster.local
+          port: 9191
+          # A decision that takes longer than this fails the request closed.
+          # It is deliberately short: this call happens on every request, and a
+          # slow authorization service is indistinguishable from a slow API.
+          timeout: 0.5s
+          # Without these, the identity headers portcullis sets are computed
+          # and then dropped by the sidecar.
+          includeRequestHeadersInCheck:
+            - authorization
+            - x-request-id
+          headersToUpstreamOnAllow:
+            - x-portcullis-subject
+            - x-portcullis-tenant
+            - x-portcullis-issuer
+            - x-portcullis-scopes
+            - x-portcullis-claim-*
+          headersToDownstreamOnDeny:
+            - content-type
+            - www-authenticate

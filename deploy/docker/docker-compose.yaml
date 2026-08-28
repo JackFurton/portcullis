@@ -1,0 +1,55 @@
+# The whole authorization path on a laptop: Envoy, this service, a stand-in
+# identity provider, and an upstream that reports what actually reached it.
+name: portcullis-demo
+
+services:
+  portcullis:
+    build:
+      context: ../..
+    # The image entrypoint is /portcullis, so command carries flags only.
+    command:
+      - --policy=/etc/portcullis/policy.yaml
+      - --log-level=debug
+      - --log-format=text
+    volumes:
+      - ./policy.yaml:/etc/portcullis/policy.yaml:ro
+    ports:
+      # Metrics and health. Mapped high to stay clear of whatever else is
+      # already listening on a developer laptop.
+      - "9812:9192"
+    healthcheck:
+      test: ["CMD", "/portcullis", "--check", "--policy=/etc/portcullis/policy.yaml"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  demoidp:
+    build:
+      context: ../..
+    entrypoint: [/demoidp]
+    command:
+      - --addr=:9000
+      - --issuer=http://demoidp:9000/
+      - --audience=api://demo
+      - --i-understand-this-mints-tokens-for-anyone
+    ports:
+      - "9800:9000"
+
+  echo:
+    build:
+      context: ../..
+    entrypoint: [/echo]
+    command: ["--addr=:8080"]
+
+  envoy:
+    image: envoyproxy/envoy:v1.34-latest
+    command: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"]
+    volumes:
+      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+    ports:
+      - "10000:10000"
+      - "9901:9901"
+    depends_on:
+      - portcullis
+      - echo
+      - demoidp

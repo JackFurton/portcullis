@@ -1,0 +1,58 @@
+# Demo policy. Rules are evaluated in order and the first match decides;
+# anything matching no rule is denied.
+failureMode: deny
+
+issuers:
+  - name: demo
+    issuer: http://demoidp:9000/
+    jwksURL: http://demoidp:9000/jwks.json
+    audiences: [api://demo]
+    algorithms: [RS256]
+    tenantClaim: tenant_id
+    scopeClaim: scope
+    forwardClaims: [email]
+    clockSkew: 30s
+    refreshInterval: 5m
+
+rules:
+  # Open, but a valid token is still identified and forwarded.
+  - name: health
+    match:
+      pathsExact: [/healthz]
+      methods: [GET]
+    allow:
+      public: true
+
+  # Any tenant, as long as the token names one and carries the read scope.
+  - name: events-read
+    match:
+      pathPrefixes: [/v1/events]
+      methods: [GET, HEAD]
+    allow:
+      issuers: [demo]
+      scopes: [events.read]
+      tenants: ["*"]
+
+  - name: events-write
+    match:
+      pathPrefixes: [/v1/events]
+      methods: [POST, PUT, PATCH, DELETE]
+    allow:
+      issuers: [demo]
+      scopes: [events.write]
+      tenants: ["*"]
+
+  # Only these two tenants, and only with the admin scope.
+  - name: admin
+    match:
+      pathPrefixes: [/v1/admin]
+    allow:
+      issuers: [demo]
+      scopes: [admin]
+      tenants: [acme, globex]
+
+  # A rule with no allow block denies everything it matches. This one exists
+  # to make the denial explicit and to give it a name in the metrics.
+  - name: internal-never-public
+    match:
+      pathPrefixes: [/internal]

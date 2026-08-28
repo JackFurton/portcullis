@@ -1,0 +1,5 @@
+.git
+bin
+cover.out
+deploy/docker/*.yaml
+!deploy/docker/policy.yaml

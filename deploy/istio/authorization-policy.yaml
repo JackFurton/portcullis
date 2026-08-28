@@ -1,0 +1,26 @@
+# Sends requests to portcullis for a decision.
+#
+# CUSTOM is the action that delegates to an external provider. The rules below
+# select what gets sent; anything not selected is not authorized by this
+# service at all, so the selector is part of the security boundary rather than
+# a performance tweak.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: portcullis
+  namespace: apps
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+  action: CUSTOM
+  provider:
+    name: portcullis
+  rules:
+    # Everything reaching this workload is decided by portcullis, including
+    # paths that are meant to be public. Making them public is the policy
+    # file's job, where the decision is written down and testable, rather than
+    # a notPaths exclusion here that silently bypasses authorization.
+    - to:
+        - operation:
+            paths: ["/*"]
