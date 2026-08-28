@@ -1,6 +1,9 @@
 # One image, four binaries: the authorization service, and the three pieces the
 # demo needs so it runs with nothing pulled from a registry but Envoy itself.
-FROM golang:1.27 AS builder
+# Pinned to the build platform so the Go toolchain runs natively and
+# cross-compiles, rather than the whole builder stage running under QEMU. On a
+# multi-arch build that is the difference between two minutes and twenty.
+FROM --platform=$BUILDPLATFORM golang:1.27 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 # Stamped into the binary so a running pod can say what it is.
