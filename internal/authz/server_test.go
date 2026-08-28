@@ -86,11 +86,6 @@ func newFixtureWithCache(t *testing.T, cacheSize int) *fixture {
 	return newFixtureWith(t, policyTemplate, cacheSize)
 }
 
-func newFixtureWithPolicy(t *testing.T, template string) *fixture {
-	t.Helper()
-	return newFixtureWith(t, template, token.DefaultCacheSize)
-}
-
 // newFixtureWith builds a server over a policy written by the test, with the
 // issuer URL and JWKS URL of a freshly minted issuer filled in.
 func newFixtureWith(t *testing.T, template string, cacheSize int) *fixture {
@@ -213,7 +208,7 @@ rules:
 // Shadow mode is how a policy gets rolled out without an outage: it allows the
 // request, records what it would have done, and counts it separately.
 func TestShadowModeAllowsWhatItWouldDeny(t *testing.T) {
-	f := newFixtureWithPolicy(t, shadowPolicy)
+	f := newFixtureWith(t, shadowPolicy, token.DefaultCacheSize)
 
 	// No scope, so the rule would refuse this.
 	headers := f.bearer(t, testjwt.Claims{"sub": "svc", "tenant_id": "acme"})
@@ -235,7 +230,7 @@ func TestShadowModeAllowsWhatItWouldDeny(t *testing.T) {
 // The upstream has to see the same headers it will see once the rule is
 // enforced, or the shadow run proves nothing about what enforcing will do.
 func TestShadowModeStillForwardsIdentity(t *testing.T) {
-	f := newFixtureWithPolicy(t, shadowPolicy)
+	f := newFixtureWith(t, shadowPolicy, token.DefaultCacheSize)
 
 	headers := f.bearer(t, testjwt.Claims{"sub": "svc", "tenant_id": "acme"})
 
@@ -251,7 +246,7 @@ func TestShadowModeStillForwardsIdentity(t *testing.T) {
 // A rule can opt back into enforcement while the rest of the policy is shadowed,
 // which is what a staged rollout looks like in practice.
 func TestRuleModeOverridesThePolicyDefault(t *testing.T) {
-	f := newFixtureWithPolicy(t, shadowPolicy)
+	f := newFixtureWith(t, shadowPolicy, token.DefaultCacheSize)
 
 	headers := f.bearer(t, testjwt.Claims{"sub": "svc", "tenant_id": "initech", "scope": "admin"})
 
@@ -267,7 +262,7 @@ func TestRuleModeOverridesThePolicyDefault(t *testing.T) {
 // Shadow suppresses denials, not errors. Whether the service could reach a
 // decision is a different question from what the decision would have been.
 func TestShadowModeDoesNotSuppressInternalErrors(t *testing.T) {
-	f := newFixtureWithPolicy(t, shadowPolicy)
+	f := newFixtureWith(t, shadowPolicy, token.DefaultCacheSize)
 
 	resp, err := f.server.Check(context.Background(), &authv3.CheckRequest{})
 	if err != nil {
