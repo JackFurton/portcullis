@@ -252,6 +252,17 @@ The tests mint real tokens against a real key set and verify real signatures,
 including the forged ones. The bugs worth catching in this service live in
 exactly the code a stub verifier would replace.
 
+Path normalization and token parsing are fuzzed, since both take input straight
+from an attacker and both decide whether a request is authorized. The targets
+assert properties rather than expected outputs: a normalized path never
+contains an encoded delimiter, a dot segment or a control character, and
+normalizing it again returns it unchanged.
+
+The first run of those targets found three issues in under three minutes,
+including a double encoding case where `%252f` survived the delimiter check and
+decoded into an encoded slash sitting in the output. CI runs a short fuzz pass
+on every push.
+
 ## Status
 
 Working and tested, but young, and the policy format may change before v1.

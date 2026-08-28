@@ -35,6 +35,22 @@ func TestNormalizePathRejectsAmbiguity(t *testing.T) {
 		{name: "empty segment", path: "/v1//admin", err: true},
 		{name: "backslash", path: `/v1\admin`, err: true},
 		{name: "bad percent encoding", path: "/v1/%zz", err: true},
+
+		// Found by FuzzNormalizePath. The query is split off before decoding,
+		// so a decoded "?" would survive into the result and a second pass
+		// would truncate there instead.
+		{name: "encoded question mark", path: "/v1/events%3fadmin", err: true},
+		{name: "encoded hash", path: "/v1/events%23fragment", err: true},
+
+		// Also found by fuzzing, and the dangerous one: "%252f" survives the
+		// encoded delimiter check, decodes to "%2f", and leaves an encoded
+		// slash for whatever decodes next.
+		{name: "double encoded slash", path: "/v1/public%252fadmin", err: true},
+		{name: "double encoded anything", path: "/0%2520", err: true},
+		{name: "encoded percent", path: "/%25", err: true},
+
+		{name: "null byte", path: "/v1/%00admin", err: true},
+		{name: "control character", path: "/v1/%09admin", err: true},
 		{name: "relative", path: "v1/events", err: true},
 	}
 

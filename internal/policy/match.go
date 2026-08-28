@@ -39,11 +39,31 @@ func NormalizePath(path string) (string, error) {
 		return "", fmt.Errorf("%w: %q does not start with a slash", ErrMalformedPath, path)
 	}
 
-	// An encoded slash has to be caught before decoding: afterwards it is
-	// indistinguishable from a real segment boundary, which is the whole trick.
+	// Encoded delimiters have to be caught before decoding: afterwards they
+	// are indistinguishable from the real thing, which is the whole trick.
+	//
+	// Slash and backslash are the segment separators. Question mark and hash
+	// are the query and fragment separators, and they matter for a subtler
+	// reason: the query is split off above, before decoding, so a decoded "?"
+	// would survive into the normalized path and a second pass would then
+	// treat it as the start of a query and truncate there. The same path would
+	// normalize to two different things depending on how many times it had
+	// been through here.
 	lower := strings.ToLower(raw)
-	if strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") {
-		return "", fmt.Errorf("%w: %q contains an encoded separator", ErrMalformedPath, path)
+	for _, encoded := range []string{"%2f", "%5c", "%3f", "%23"} {
+		if strings.Contains(lower, encoded) {
+			return "", fmt.Errorf("%w: %q contains an encoded delimiter", ErrMalformedPath, path)
+		}
+	}
+
+	// An encoded percent sign means the path carries a second layer of
+	// encoding, and this function decodes exactly once. "%252f" passes the
+	// check above, decodes to "%2f", and leaves an encoded slash sitting in
+	// the output for whatever decodes next. How many times a path gets decoded
+	// on its way to the upstream is not something this service can know, so
+	// the only safe number of layers is one.
+	if strings.Contains(lower, "%25") {
+		return "", fmt.Errorf("%w: %q is doubly encoded", ErrMalformedPath, path)
 	}
 
 	decoded, err := url.PathUnescape(raw)
@@ -59,6 +79,15 @@ func NormalizePath(path string) (string, error) {
 	for segment := range strings.SplitSeq(decoded, "/") {
 		if segment == "." || segment == ".." {
 			return "", fmt.Errorf("%w: %q contains a dot segment", ErrMalformedPath, path)
+		}
+	}
+	// A control character in a path is never legitimate and is handled
+	// inconsistently by whatever is downstream. A null byte in particular
+	// truncates the path in anything backed by C string handling, so the rule
+	// that matched and the path that gets served could differ.
+	for _, r := range decoded {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("%w: %q contains a control character", ErrMalformedPath, path)
 		}
 	}
 	return decoded, nil

@@ -26,6 +26,35 @@ jobs:
       # Compile and run every benchmark once, so they cannot rot unnoticed.
       - run: go test ./... -run XXX -bench . -benchtime 1x
 
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # A short run on every push. It is not long enough to find something
+      # deep, and it is long enough that a change which breaks one of these
+      # properties outright does not get merged. The first run of these targets
+      # found three real issues in under three minutes.
+      - name: Path normalization
+        run: go test ./internal/policy -run Fuzz -fuzz FuzzNormalizePath -fuzztime 60s
+      - name: Token parsing
+        run: |
+          go test ./internal/token -run Fuzz -fuzz FuzzPeekIssuer -fuzztime 30s
+          go test ./internal/token -run Fuzz -fuzz FuzzBearerToken -fuzztime 30s
+          go test ./internal/token -run Fuzz -fuzz FuzzParseSigned -fuzztime 30s
+      - name: Report any crash the run found
+        if: failure()
+        run: |
+          echo "A fuzz target failed. The input is under testdata/fuzz; commit it as a regression case."
+          find . -path '*/testdata/fuzz/*' -type f -print -exec cat {} \;
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

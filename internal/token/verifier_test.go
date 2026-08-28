@@ -314,6 +314,17 @@ func TestVerifyDoesNotCacheFailures(t *testing.T) {
 	}
 }
 
+// Found by FuzzPeekIssuer. The value is unverified and reaches a lookup and a
+// log line, so a control character in it is rejected rather than carried.
+func TestPeekIssuerRejectsControlCharacters(t *testing.T) {
+	// {"iss":"	-4"}
+	raw := ".eyJpc1MiOiJcdC00In0."
+
+	if issuer, ok := token.PeekIssuer(raw); ok {
+		t.Errorf("PeekIssuer returned %q, want it rejected", issuer)
+	}
+}
+
 func TestBearerToken(t *testing.T) {
 	tests := []struct {
 		header string

@@ -32,7 +32,17 @@ func PeekIssuer(raw string) (string, bool) {
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return "", false
 	}
-	return claims.Issuer, claims.Issuer != ""
+	if claims.Issuer == "" {
+		return "", false
+	}
+	// This value is unverified and ends up in a lookup and in a log line. A
+	// control character in it cannot match any configured issuer anyway, so
+	// rejecting here costs nothing and keeps unvalidated bytes from travelling
+	// any further than they have to.
+	if err := safeHeaderValue(claims.Issuer); err != nil {
+		return "", false
+	}
+	return claims.Issuer, true
 }
 
 // BearerToken pulls the credential out of an Authorization header value. The
