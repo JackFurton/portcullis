@@ -11,6 +11,10 @@ const (
 	DecisionAllow = "allow"
 	DecisionDeny  = "deny"
 	DecisionError = "error"
+	// DecisionShadowDeny is a request the policy would have refused, allowed
+	// because the rule is in shadow mode. This is the series you watch during
+	// a rollout, and the one that has to reach zero before enforcing.
+	DecisionShadowDeny = "shadow_deny"
 )
 
 var (

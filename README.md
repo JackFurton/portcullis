@@ -129,9 +129,47 @@ dynamic metadata.
 | `wrong_tenant`, `wrong_subject` | 403 | Identity does not match the rule |
 | `internal_error` | 503 | No decision could be reached; `failureMode` applied |
 
+A rule in shadow mode reports the reason it would have denied, with the request
+allowed. See below.
+
 The reason is deliberately coarse in the response and specific in the logs. A
 401 that names which check failed tells whoever is probing which one to work on
 next.
+
+## Rolling out a policy without breaking people
+
+The scary part of authorization is the first day it says no. Shadow mode makes
+that a measurement instead of a deploy:
+
+```yaml
+mode: shadow          # policy default
+
+rules:
+  - name: admin
+    mode: enforce     # this one is already trusted
+    match: {pathPrefixes: [/v1/admin]}
+    allow: {scopes: [admin], tenants: [acme]}
+
+  - name: events
+    match: {pathPrefixes: [/v1/events]}
+    allow: {scopes: [events.read], tenants: ["*"]}
+```
+
+A shadowed rule allows the request, logs what it would have done at info level,
+counts it under `portcullis_decisions_total{decision="shadow_deny"}`, and marks
+the decision `shadow` in dynamic metadata so an access log can attribute it to
+a route.
+
+Identity headers are still forwarded exactly as they will be under
+enforcement, so the shadow run tells you something about what enforcing will
+actually do rather than only about who would have been refused.
+
+Watch `shadow_deny` until it reaches zero, or until everything left in it is
+something you meant to refuse. Then switch the rule to `enforce`.
+
+Shadow never applies to `internal_error`. Whether the service could reach a
+decision is a different question from what the decision would have been, and
+`failureMode` already answers it.
 
 ## Optional authentication
 

@@ -37,7 +37,12 @@ type decision struct {
 	allowed bool
 	reason  Reason
 	rule    string
-	status  int
+	// shadow is set when the policy would have denied this request but is
+	// running in shadow mode, so it was allowed anyway. reason still holds the
+	// reason it would have been denied, which is the whole point of recording
+	// it.
+	shadow bool
+	status int
 	// challenge is the WWW-Authenticate value, set on 401s.
 	challenge string
 	// identity is set when a valid token was presented, including on public
@@ -46,6 +51,27 @@ type decision struct {
 	// detail is logged but never returned to the caller. A 401 that explains
 	// exactly which check failed is a tool for guessing at the next one.
 	detail string
+}
+
+// shadowed converts a denial into an allow that remembers what it would have
+// done. The identity is carried through so the upstream sees the same headers
+// it will see once the rule is enforced, which is what makes a shadow rollout
+// tell you something.
+func (d decision) shadowed() decision {
+	d.allowed = true
+	d.shadow = true
+	d.status = 0
+	d.challenge = ""
+	return d
+}
+
+// withIdentity attaches the verified caller to a decision. Denials that happen
+// after verification carry it too: it is what lets a shadowed rule forward the
+// same headers it will forward once enforced, and it means an enforced denial
+// can say who was refused rather than just that someone was.
+func (d decision) withIdentity(identity *token.Identity) decision {
+	d.identity = identity
+	return d
 }
 
 func allow(rule string, reason Reason, identity *token.Identity) decision {

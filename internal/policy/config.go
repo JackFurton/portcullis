@@ -32,10 +32,31 @@ const (
 	FailOpen FailureMode = "allow"
 )
 
+// Mode decides whether a denial is acted on or only recorded.
+type Mode string
+
+const (
+	// ModeEnforce denies what the policy says to deny. This is the default.
+	ModeEnforce Mode = "enforce"
+	// ModeShadow allows the request but records what would have happened.
+	//
+	// This is how an authorization policy gets rolled out without an outage:
+	// turn it on in shadow, watch which callers it would have refused, find
+	// the internal services nobody remembered, then switch to enforce.
+	ModeShadow Mode = "shadow"
+)
+
 // Config is the whole policy.
 type Config struct {
 	// FailureMode decides what an internal error means. Defaults to deny.
 	FailureMode FailureMode `json:"failureMode,omitempty"`
+
+	// Mode is the default for every rule. Defaults to enforce.
+	//
+	// Shadow never applies to an internal error. Whether the service could
+	// reach a decision is a different question from what the decision would
+	// have been, and failureMode already answers it.
+	Mode Mode `json:"mode,omitempty"`
 
 	// Issuers are the token issuers this service trusts. A token from an
 	// issuer that is not listed here is never valid, regardless of signature.
@@ -102,6 +123,10 @@ type Issuer struct {
 type Rule struct {
 	// Name appears in logs, metrics and dynamic metadata.
 	Name string `json:"name"`
+
+	// Mode overrides the policy default for this rule, so one rule can be
+	// rolled out in shadow while the rest of the policy is enforced.
+	Mode Mode `json:"mode,omitempty"`
 
 	// Match selects the requests this rule applies to. An empty Match matches
 	// every request, which is only useful as the last rule.
@@ -224,6 +249,14 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Errorf("failureMode %q must be %q or %q", c.FailureMode, FailClosed, FailOpen))
 	}
 
+	switch c.Mode {
+	case "":
+		c.Mode = ModeEnforce
+	case ModeEnforce, ModeShadow:
+	default:
+		errs = append(errs, fmt.Errorf("mode %q must be %q or %q", c.Mode, ModeEnforce, ModeShadow))
+	}
+
 	if c.ForwardPrefix == "" {
 		c.ForwardPrefix = DefaultForwardPrefix
 	}
@@ -300,6 +333,11 @@ func (r *Rule) validate(issuers map[string]bool) error {
 	if r.Name == "" {
 		errs = append(errs, errors.New("name is required"))
 	}
+	switch r.Mode {
+	case "", ModeEnforce, ModeShadow:
+	default:
+		errs = append(errs, fmt.Errorf("mode %q must be %q or %q", r.Mode, ModeEnforce, ModeShadow))
+	}
 	for _, method := range r.Match.Methods {
 		if method != strings.ToUpper(method) {
 			errs = append(errs, fmt.Errorf("method %q must be upper case", method))
@@ -337,6 +375,19 @@ func validMethod(method string) bool {
 		return true
 	}
 	return false
+}
+
+// EffectiveMode reports the mode a decision is subject to. A rule with no mode
+// of its own inherits the policy default, and a request that matched no rule
+// uses the policy default too.
+func (c *Config) EffectiveMode(rule *Rule) Mode {
+	if rule != nil && rule.Mode != "" {
+		return rule.Mode
+	}
+	if c.Mode == "" {
+		return ModeEnforce
+	}
+	return c.Mode
 }
 
 // IssuerByName looks up a configured issuer by its name.
