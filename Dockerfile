@@ -1,6 +1,6 @@
 # One image, four binaries: the authorization service, and the three pieces the
 # demo needs so it runs with nothing pulled from a registry but Envoy itself.
-FROM golang:1.26 AS builder
+FROM golang:1.27 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 # Stamped into the binary so a running pod can say what it is.
