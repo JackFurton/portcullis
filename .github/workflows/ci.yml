@@ -36,10 +36,11 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      # v2 of golangci-lint needs v7 or newer of this action.
-      - uses: golangci/golangci-lint-action@v7
-        with:
-          version: v2.6.2
+      # Built from source with this repo's toolchain rather than pulled as a
+      # prebuilt binary. The published builds target an older Go than go.mod
+      # does, which golangci-lint refuses to run against, and building it here
+      # also means CI and "make lint" cannot disagree.
+      - run: make lint
 
   policy:
     name: Policy
